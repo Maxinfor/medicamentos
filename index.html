@@ -1,0 +1,299 @@
+// ============================================================================
+// PACOTE: com.lembremed.dto
+// ============================================================================
+package com.lembremed.dto;
+
+public class MedicamentoVisionDto {
+    private String nome;
+    private String dosagem;
+    private String observacoes;
+
+    public MedicamentoVisionDto() {}
+
+    public String getNome() { return nome; }
+    public void setNome(String nome) { this.nome = nome; }
+
+    public String getDosagem() { return dosagem; }
+    public void setDosagem(String dosagem) { this.dosagem = dosagem; }
+
+    public String getObservacoes() { return observacoes; }
+    public void setObservacoes(String observacoes) { this.observacoes = observacoes; }
+}
+
+// ============================================================================
+// PACOTE: com.lembremed.model
+// ============================================================================
+package com.lembremed.model;
+
+import javax.persistence.*;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+
+@Entity
+@Table(name = "medicamentos")
+public class Medicamento {
+    
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    
+    @Column(nullable = false, length = 100)
+    private String nome;
+    
+    @Column(nullable = false, length = 50)
+    private String dosagem;
+    
+    @Column(nullable = false)
+    private LocalTime horario;
+    
+    @Column(length = 20)
+    private String frequencia;
+    
+    @Column(length = 500)
+    private String observacoes;
+    
+    @Lob
+    @Column(columnDefinition = "LONGTEXT")
+    private String imagemBase64;
+    
+    private boolean tomado;
+    private LocalDateTime ultimoTomado;
+    private LocalDateTime dataCriacao;
+    
+    // Getters e Setters
+    public Long getId() { return id; }
+    public void setId(Long id) { this.id = id; }
+    
+    public String getNome() { return nome; }
+    public void setNome(String nome) { this.nome = nome; }
+    
+    public String getDosagem() { return dosagem; }
+    public void setDosagem(String dosagem) { this.dosagem = dosagem; }
+    
+    public LocalTime getHorario() { return horario; }
+    public void setHorario(LocalTime horario) { this.horario = horario; }
+    
+    public String getFrequencia() { return frequencia; }
+    public void setFrequencia(String frequencia) { this.frequencia = frequencia; }
+    
+    public String getObservacoes() { return observacoes; }
+    public void setObservacoes(String observacoes) { this.observacoes = observacoes; }
+    
+    public String getImagemBase64() { return imagemBase64; }
+    public void setImagemBase64(String imagemBase64) { this.imagemBase64 = imagemBase64; }
+    
+    public boolean isTomado() { return tomado; }
+    public void setTomado(boolean tomado) { this.tomado = tomado; }
+    
+    public LocalDateTime getUltimoTomado() { return ultimoTomado; }
+    public void setUltimoTomado(LocalDateTime ultimoTomado) { this.ultimoTomado = ultimoTomado; }
+    
+    public LocalDateTime getDataCriacao() { return dataCriacao; }
+    public void setDataCriacao(LocalDateTime dataCriacao) { this.dataCriacao = dataCriacao; }
+}
+
+// ============================================================================
+// PACOTE: com.lembremed.repository
+// ============================================================================
+package com.lembremed.repository;
+
+import com.lembremed.model.Medicamento;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+import java.time.LocalTime;
+import java.util.List;
+
+public interface MedicamentoRepository extends JpaRepository<Medicamento, Long> {
+    List<Medicamento> findByHorarioBetween(LocalTime inicio, LocalTime fim);
+    
+    @Query("SELECT m FROM Medicamento m WHERE m.tomado = false AND m.horario <= :horario")
+    List<Medicamento> findPendentes(@Param("horario") LocalTime horario);
+    
+    List<Medicamento> findByTomadoFalse();
+}
+
+// ============================================================================
+// PACOTE: com.lembremed.service (VisionService)
+// ============================================================================
+package com.lembremed.service;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.lembremed.dto.MedicamentoVisionDto;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.*;
+import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
+import java.util.*;
+
+@Service
+public class VisionService {
+
+    @Value("${GEMINI_API_KEY}")
+    private String apiKey;
+
+    private static final String API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=";
+
+    public MedicamentoVisionDto analisarCaixaMedicamento(String imagemBase64) {
+        RestTemplate restTemplate = new RestTemplate();
+        String base64Data = imagemBase64.contains(",") ? imagemBase64.split(",")[1] : imagemBase64;
+
+        String prompt = "Extraia o nome comercial, a dosagem e observações (princípio ativo) desta caixa de remédio em formato JSON estrito: " +
+                "{\"nome\":\"\",\"dosagem\":\"\",\"observacoes\":\"\"}. Retorne APENAS o JSON.";
+
+        Map<String, Object> body = Map.of(
+            "contents", List.of(Map.of("parts", List.of(
+                Map.of("text", prompt),
+                Map.of("inline_data", Map.of("mime_type", "image/jpeg", "data", base64Data))
+            )))
+        );
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        
+        try {
+            ResponseEntity<Map> resp = restTemplate.postForEntity(API_URL + apiKey, new HttpEntity<>(body, headers), Map.class);
+            Map responseBody = resp.getBody();
+            List<Map> candidates = (List<Map>) responseBody.get("candidates");
+            Map contentResp = (Map) candidates.get(0).get("content");
+            List<Map> partsResp = (List<Map>) contentResp.get("parts");
+            String text = (String) partsResp.get(0).get("text");
+
+            String jsonClean = text.replace("```json", "").replace("```", "").trim();
+            return new ObjectMapper().readValue(jsonClean, MedicamentoVisionDto.class);
+        } catch (Exception e) {
+            throw new RuntimeException("Erro ao processar imagem com IA: " + e.getMessage());
+        }
+    }
+}
+
+// ============================================================================
+// PACOTE: com.lembremed.service (MedicamentoService)
+// ============================================================================
+package com.lembremed.service;
+
+import com.lembremed.model.Medicamento;
+import com.lembremed.repository.MedicamentoRepository;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.util.List;
+
+@Service
+public class MedicamentoService {
+    
+    @Autowired
+    private MedicamentoRepository repository;
+    
+    public List<Medicamento> listarTodos() {
+        return repository.findAll();
+    }
+    
+    public Medicamento salvar(Medicamento medicamento) {
+        medicamento.setDataCriacao(LocalDateTime.now());
+        medicamento.setTomado(false);
+        return repository.save(medicamento);
+    }
+    
+    public Medicamento marcarTomado(Long id) {
+        Medicamento med = repository.findById(id)
+            .orElseThrow(() -> new RuntimeException("Medicamento não encontrado"));
+        med.setTomado(true);
+        med.setUltimoTomado(LocalDateTime.now());
+        return repository.save(med);
+    }
+    
+    public void excluir(Long id) {
+        repository.deleteById(id);
+    }
+    
+    public List<Medicamento> getPendentes() {
+        return repository.findByTomadoFalse();
+    }
+}
+
+// ============================================================================
+// PACOTE: com.lembremed.controller
+// ============================================================================
+package com.lembremed.controller;
+
+import com.lembremed.dto.MedicamentoVisionDto;
+import com.lembremed.model.Medicamento;
+import com.lembremed.service.MedicamentoService;
+import com.lembremed.service.VisionService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import java.util.List;
+import java.util.Map;
+
+@RestController
+@RequestMapping("/api/medicamentos")
+@CrossOrigin(origins = "*")
+public class MedicamentoController {
+    
+    @Autowired
+    private MedicamentoService service;
+
+    @Autowired
+    private VisionService visionService;
+    
+    @GetMapping
+    public List<Medicamento> listar() {
+        return service.listarTodos();
+    }
+    
+    @PostMapping
+    public ResponseEntity<Medicamento> criar(@RequestBody Medicamento medicamento) {
+        Medicamento salvo = service.salvar(medicamento);
+        return ResponseEntity.ok(salvo);
+    }
+    
+    @PutMapping("/{id}/tomar")
+    public ResponseEntity<Medicamento> marcarTomado(@PathVariable Long id) {
+        Medicamento atualizado = service.marcarTomado(id);
+        return ResponseEntity.ok(atualizado);
+    }
+    
+    @DeleteMapping("/{id}")
+    public ResponseEntity<Void> excluir(@PathVariable Long id) {
+        service.excluir(id);
+        return ResponseEntity.ok().build();
+    }
+    
+    @GetMapping("/pendentes")
+    public List<Medicamento> pendentes() {
+        return service.getPendentes();
+    }
+
+    @PostMapping("/analisar-foto")
+    public ResponseEntity<MedicamentoVisionDto> analisarFoto(@RequestBody Map<String, String> payload) {
+        String imagemBase64 = payload.get("imagemBase64");
+        if (imagemBase64 == null || imagemBase64.isEmpty()) {
+            return ResponseEntity.badRequest().build();
+        }
+        MedicamentoVisionDto dadosExtraidos = visionService.analisarCaixaMedicamento(imagemBase64);
+        return ResponseEntity.ok(dadosExtraidos);
+    }
+}
+
+// ============================================================================
+// ARQUIVO: application.properties
+// ============================================================================
+/*
+spring.datasource.url=jdbc:mysql://localhost:3306/lembremed?useSSL=false&serverTimezone=UTC
+spring.datasource.username=root
+spring.datasource.password=root
+spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
+
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.show-sql=true
+spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.MySQL8Dialect
+spring.jpa.properties.hibernate.format_sql=true
+
+server.port=8080
+
+# Chave injetada por variável de ambiente (Seguro para o GitHub)
+GEMINI_API_KEY=${GEMINI_API_KEY}
+*/
